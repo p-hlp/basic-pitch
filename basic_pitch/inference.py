@@ -99,16 +99,15 @@ def get_audio_input(
     # if audio samples are provided, convert to mono and resample to sample_rate if necessary
     if isinstance(audio_path_or_array, np.ndarray):
         # Check if audio is stereo and convert to mono
+        if sample_rate != AUDIO_SAMPLE_RATE:
+            audio_original = librosa.resample(
+                audio_path_or_array, orig_sr=sample_rate, target_sr=AUDIO_SAMPLE_RATE
+            )
         if audio_path_or_array.ndim > 1:
             audio_original = librosa.to_mono(audio_path_or_array)
         if sample_rate is None:
             raise ValueError(
                 "Sample_rate must be provided if audio samples are provided"
-            )
-        elif sample_rate != AUDIO_SAMPLE_RATE:
-            # Resample if necessary
-            audio_original = librosa.resample(
-                audio_path_or_array, orig_sr=sample_rate, target_sr=AUDIO_SAMPLE_RATE
             )
     else:
         audio_original, _ = librosa.load(

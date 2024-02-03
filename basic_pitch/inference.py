@@ -42,7 +42,9 @@ from basic_pitch.commandline_printing import (
 )
 
 
-def window_audio_file(audio_original: Tensor, hop_size: int) -> Tuple[Tensor, List[Dict[str, int]]]:
+def window_audio_file(
+    audio_original: Tensor, hop_size: int
+) -> Tuple[Tensor, List[Dict[str, int]]]:
     """
     Pad appropriately an audio file, and return as
     windowed signal, with window length = AUDIO_N_SAMPLES
@@ -56,7 +58,9 @@ def window_audio_file(audio_original: Tensor, hop_size: int) -> Tuple[Tensor, Li
     from tensorflow import expand_dims  # imporing this here so the module loads faster
 
     audio_windowed = expand_dims(
-        signal.frame(audio_original, AUDIO_N_SAMPLES, hop_size, pad_end=True, pad_value=0),
+        signal.frame(
+            audio_original, AUDIO_N_SAMPLES, hop_size, pad_end=True, pad_value=0
+        ),
         axis=-1,
     )
     window_times = [
@@ -70,11 +74,15 @@ def window_audio_file(audio_original: Tensor, hop_size: int) -> Tuple[Tensor, Li
 
 
 def get_audio_input(
-    audio_path: Union[pathlib.Path, str], overlap_len: int, hop_size: int
+    audio_path_or_array: Union[pathlib.Path, str, np.ndarray],
+    sample_rate: int,
+    overlap_len: int,
+    hop_size: int,
 ) -> Tuple[Tensor, List[Dict[str, int]], int]:
     """
     Read wave file (as mono), pad appropriately, and return as
     windowed signal, with window length = AUDIO_N_SAMPLES
+    If audio samples are provided, convert to mono and resample to AUDIO_SAMPLE_RATE if necessary.
 
     Returns:
         audio_windowed: tensor with shape (n_windows, AUDIO_N_SAMPLES, 1)
@@ -84,17 +92,40 @@ def get_audio_input(
             length of original audio file, in frames, BEFORE padding.
 
     """
-    assert overlap_len % 2 == 0, "overlap_length must be even, got {}".format(overlap_len)
+    assert overlap_len % 2 == 0, "overlap_length must be even, got {}".format(
+        overlap_len
+    )
 
-    audio_original, _ = librosa.load(str(audio_path), sr=AUDIO_SAMPLE_RATE, mono=True)
+    # if audio samples are provided, convert to mono and resample to sample_rate if necessary
+    if isinstance(audio_path_or_array, np.ndarray):
+        # Check if audio is stereo and convert to mono
+        if audio_path_or_array.ndim > 1:
+            audio_original = librosa.to_mono(audio_path_or_array)
+        if sample_rate is None:
+            raise ValueError(
+                "Sample_rate must be provided if audio samples are provided"
+            )
+        elif sample_rate != AUDIO_SAMPLE_RATE:
+            # Resample if necessary
+            audio_original = librosa.resample(
+                audio_path_or_array, orig_sr=sample_rate, target_sr=AUDIO_SAMPLE_RATE
+            )
+    else:
+        audio_original, _ = librosa.load(
+            str(audio_path_or_array), sr=AUDIO_SAMPLE_RATE, mono=True
+        )
 
     original_length = audio_original.shape[0]
-    audio_original = np.concatenate([np.zeros((int(overlap_len / 2),), dtype=np.float32), audio_original])
+    audio_original = np.concatenate(
+        [np.zeros((int(overlap_len / 2),), dtype=np.float32), audio_original]
+    )
     audio_windowed, window_times = window_audio_file(audio_original, hop_size)
     return audio_windowed, window_times, original_length
 
 
-def unwrap_output(output: Tensor, audio_original_length: int, n_overlapping_frames: int) -> np.array:
+def unwrap_output(
+    output: Tensor, audio_original_length: int, n_overlapping_frames: int
+) -> np.array:
     """Unwrap batched model predictions to a single matrix.
 
     Args:
@@ -115,20 +146,28 @@ def unwrap_output(output: Tensor, audio_original_length: int, n_overlapping_fram
         raw_output = raw_output[:, n_olap:-n_olap, :]
 
     output_shape = raw_output.shape
-    n_output_frames_original = int(np.floor(audio_original_length * (ANNOTATIONS_FPS / AUDIO_SAMPLE_RATE)))
-    unwrapped_output = raw_output.reshape(output_shape[0] * output_shape[1], output_shape[2])
-    return unwrapped_output[:n_output_frames_original, :]  # trim to original audio length
+    n_output_frames_original = int(
+        np.floor(audio_original_length * (ANNOTATIONS_FPS / AUDIO_SAMPLE_RATE))
+    )
+    unwrapped_output = raw_output.reshape(
+        output_shape[0] * output_shape[1], output_shape[2]
+    )
+    return unwrapped_output[
+        :n_output_frames_original, :
+    ]  # trim to original audio length
 
 
 def run_inference(
-    audio_path: Union[pathlib.Path, str],
+    audio_path_or_array: Union[pathlib.Path, str, np.ndarray],
+    sample_rate: None,
     model: keras.Model,
     debug_file: Optional[pathlib.Path] = None,
 ) -> Dict[str, np.array]:
     """Run the model on the input audio path.
 
     Args:
-        audio_path: The audio to run inference on.
+        audio_path_or_array: The audio to run inference on. Can be a path to an audio file or an array of audio samples.
+        sample_rate: The sample rate of the audio file. Used if audio_path_or_array is np.array.
         model: A loaded keras model to run inference with.
         debug_file: An optional path to output debug data to. Useful for testing/verification.
 
@@ -140,10 +179,15 @@ def run_inference(
     overlap_len = n_overlapping_frames * FFT_HOP
     hop_size = AUDIO_N_SAMPLES - overlap_len
 
-    audio_windowed, _, audio_original_length = get_audio_input(audio_path, overlap_len, hop_size)
+    audio_windowed, _, audio_original_length = get_audio_input(
+        audio_path_or_array, sample_rate, overlap_len, hop_size
+    )
 
     output = model(audio_windowed)
-    unwrapped_output = {k: unwrap_output(output[k], audio_original_length, n_overlapping_frames) for k in output}
+    unwrapped_output = {
+        k: unwrap_output(output[k], audio_original_length, n_overlapping_frames)
+        for k in output
+    }
 
     if debug_file:
         with open(debug_file, "w") as f:
@@ -153,7 +197,9 @@ def run_inference(
                     "audio_original_length": audio_original_length,
                     "hop_size_samples": hop_size,
                     "overlap_length_samples": overlap_len,
-                    "unwrapped_output": {k: v.tolist() for k, v in unwrapped_output.items()},
+                    "unwrapped_output": {
+                        k: v.tolist() for k, v in unwrapped_output.items()
+                    },
                 },
                 f,
             )
@@ -251,7 +297,9 @@ def save_note_events(
 
     with open(save_path, "w") as fhandle:
         writer = csv.writer(fhandle, delimiter=",")
-        writer.writerow(["start_time_s", "end_time_s", "pitch_midi", "velocity", "pitch_bend"])
+        writer.writerow(
+            ["start_time_s", "end_time_s", "pitch_midi", "velocity", "pitch_bend"]
+        )
         for start_time, end_time, note_number, amplitude, pitch_bend in note_events:
             row = [start_time, end_time, note_number, int(np.round(127 * amplitude))]
             if pitch_bend:
@@ -260,7 +308,8 @@ def save_note_events(
 
 
 def predict(
-    audio_path: Union[pathlib.Path, str],
+    audio_path_or_array: Union[pathlib.Path, str, np.array],
+    sample_rate: Optional[int] = None,
     model_or_model_path: Union[keras.Model, pathlib.Path, str] = ICASSP_2022_MODEL_PATH,
     onset_threshold: float = 0.5,
     frame_threshold: float = 0.3,
@@ -271,11 +320,16 @@ def predict(
     melodia_trick: bool = True,
     debug_file: Optional[pathlib.Path] = None,
     midi_tempo: float = 120,
-) -> Tuple[Dict[str, np.array], pretty_midi.PrettyMIDI, List[Tuple[float, float, int, float, Optional[List[int]]]],]:
+) -> Tuple[
+    Dict[str, np.array],
+    pretty_midi.PrettyMIDI,
+    List[Tuple[float, float, int, float, Optional[List[int]]]],
+]:
     """Run a single prediction.
 
     Args:
-        audio_path: File path for the audio to run inference on.
+        audio_path_or_array: File path for the audio to run inference on or np.array of audio samples.
+        sample_rate: The sample rate of the audio file. Used if audio_path_or_array is np.array.
         model_or_model_path: Path to load the Keras saved model from. Can be local or on GCS.
         onset_threshold: Minimum energy required for an onset to be considered present.
         frame_threshold: Minimum energy requirement for a frame to be considered present.
@@ -298,10 +352,15 @@ def predict(
         else:
             model = model_or_model_path
 
-        print(f"Predicting MIDI for {audio_path}...")
+        if not isinstance(audio_path_or_array, np.ndarray):
+            print(f"Predicting MIDI for {audio_path_or_array}...")
 
-        model_output = run_inference(audio_path, model, debug_file)
-        min_note_len = int(np.round(minimum_note_length / 1000 * (AUDIO_SAMPLE_RATE / FFT_HOP)))
+        model_output = run_inference(
+            audio_path_or_array, sample_rate, model, debug_file
+        )
+        min_note_len = int(
+            np.round(minimum_note_length / 1000 * (AUDIO_SAMPLE_RATE / FFT_HOP))
+        )
         midi_data, note_events = infer.model_output_to_notes(
             model_output,
             onset_thresh=onset_threshold,
@@ -400,17 +459,25 @@ def predict_and_save(
             )
 
             if save_model_outputs:
-                model_output_path = build_output_path(audio_path, output_directory, OutputExtensions.MODEL_OUTPUT_NPZ)
+                model_output_path = build_output_path(
+                    audio_path, output_directory, OutputExtensions.MODEL_OUTPUT_NPZ
+                )
                 try:
                     np.savez(model_output_path, basic_pitch_model_output=model_output)
-                    file_saved_confirmation(OutputExtensions.MODEL_OUTPUT_NPZ.name, model_output_path)
+                    file_saved_confirmation(
+                        OutputExtensions.MODEL_OUTPUT_NPZ.name, model_output_path
+                    )
                 except Exception as e:
-                    failed_to_save(OutputExtensions.MODEL_OUTPUT_NPZ.name, model_output_path)
+                    failed_to_save(
+                        OutputExtensions.MODEL_OUTPUT_NPZ.name, model_output_path
+                    )
                     raise e
 
             if save_midi:
                 try:
-                    midi_path = build_output_path(audio_path, output_directory, OutputExtensions.MIDI)
+                    midi_path = build_output_path(
+                        audio_path, output_directory, OutputExtensions.MIDI
+                    )
                 except IOError as e:
                     raise e
                 try:
@@ -421,19 +488,31 @@ def predict_and_save(
                     raise e
 
             if sonify_midi:
-                midi_sonify_path = build_output_path(audio_path, output_directory, OutputExtensions.MIDI_SONIFICATION)
+                midi_sonify_path = build_output_path(
+                    audio_path, output_directory, OutputExtensions.MIDI_SONIFICATION
+                )
                 try:
-                    infer.sonify_midi(midi_data, midi_sonify_path, sr=sonification_samplerate)
-                    file_saved_confirmation(OutputExtensions.MIDI_SONIFICATION.name, midi_sonify_path)
+                    infer.sonify_midi(
+                        midi_data, midi_sonify_path, sr=sonification_samplerate
+                    )
+                    file_saved_confirmation(
+                        OutputExtensions.MIDI_SONIFICATION.name, midi_sonify_path
+                    )
                 except Exception as e:
-                    failed_to_save(OutputExtensions.MIDI_SONIFICATION.name, midi_sonify_path)
+                    failed_to_save(
+                        OutputExtensions.MIDI_SONIFICATION.name, midi_sonify_path
+                    )
                     raise e
 
             if save_notes:
-                note_events_path = build_output_path(audio_path, output_directory, OutputExtensions.NOTE_EVENTS)
+                note_events_path = build_output_path(
+                    audio_path, output_directory, OutputExtensions.NOTE_EVENTS
+                )
                 try:
                     save_note_events(note_events, note_events_path)
-                    file_saved_confirmation(OutputExtensions.NOTE_EVENTS.name, note_events_path)
+                    file_saved_confirmation(
+                        OutputExtensions.NOTE_EVENTS.name, note_events_path
+                    )
                 except Exception as e:
                     failed_to_save(OutputExtensions.NOTE_EVENTS.name, note_events_path)
                     raise e
